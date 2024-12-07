@@ -2,13 +2,16 @@
 #define CAVC_POLYLINEOFFSET_HPP
 #include "polyline.hpp"
 #include "polylineintersects.hpp"
-#include <unordered_map>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 // This header has functions for offsetting polylines
 
 namespace cavc {
+
+enum JoinMode { Miter, Round };
+
 namespace internal {
 /// Represents a raw polyline offset segment.
 template <typename Real> struct PlineOffsetSegment {
@@ -106,7 +109,7 @@ Real bulgeForConnection(Vector2<Real> const &arcCenter, Vector2<Real> const &sp,
 
 template <typename Real>
 void lineToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> const &s2,
-                    bool connectionArcsAreCCW, Polyline<Real> &result) {
+                    bool connectionArcsAreCCW, JoinMode mode, Polyline<Real> &result) {
   const auto &v1 = s1.v1;
   const auto &v2 = s1.v2;
   const auto &u1 = s2.v1;
@@ -143,7 +146,10 @@ void lineToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real>
     case LineSeg2LineSeg2IntrType::False:
       if (intrResult.t0 > Real(1) && falseIntersect(intrResult.t1)) {
         // extend and join the lines together using an arc
-        connectUsingArc();
+        if (mode == Round)
+          connectUsingArc();
+        else
+          addOrReplaceIfSamePos(result, PlineVertex<Real>(intrResult.point, Real(0)));
       } else {
         addOrReplaceIfSamePos(result, PlineVertex<Real>(v2.pos(), Real(0)));
         addOrReplaceIfSamePos(result, u1);
@@ -155,7 +161,7 @@ void lineToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real>
 
 template <typename Real>
 void lineToArcJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> const &s2,
-                   bool connectionArcsAreCCW, Polyline<Real> &result) {
+                   bool connectionArcsAreCCW, JoinMode mode, Polyline<Real> &result) {
 
   const auto &v1 = s1.v1;
   const auto &v2 = s1.v2;
@@ -175,27 +181,37 @@ void lineToArcJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> 
 
   const auto arc = arcRadiusAndCenter(u1, u2);
 
+  auto trimAtIntersect = [&](Vector2<Real> const &intersect) {
+    // trim at intersect
+    Real a = angle(arc.center, intersect);
+    Real arcEndAngle = angle(arc.center, u2.pos());
+    Real theta = utils::deltaAngle(a, arcEndAngle);
+    // ensure the sign matches (may get flipped if intersect is at the very end of the arc, in
+    // which case we do not want to update the bulge)
+    if ((theta > Real(0)) == u1.bulgeIsPos()) {
+      addOrReplaceIfSamePos(result, PlineVertex<Real>(intersect, std::tan(theta / Real(4))));
+    } else {
+      addOrReplaceIfSamePos(result, PlineVertex<Real>(intersect, u1.bulge()));
+    }
+  };
+
   auto processIntersect = [&](Real t, Vector2<Real> const &intersect) {
     const bool trueSegIntersect = !falseIntersect(t);
     const bool trueArcIntersect =
         pointWithinArcSweepAngle(arc.center, u1.pos(), u2.pos(), u1.bulge(), intersect);
     if (trueSegIntersect && trueArcIntersect) {
-      // trim at intersect
-      Real a = angle(arc.center, intersect);
-      Real arcEndAngle = angle(arc.center, u2.pos());
-      Real theta = utils::deltaAngle(a, arcEndAngle);
-      // ensure the sign matches (may get flipped if intersect is at the very end of the arc, in
-      // which case we do not want to update the bulge)
-      if ((theta > Real(0)) == u1.bulgeIsPos()) {
-        addOrReplaceIfSamePos(result, PlineVertex<Real>(intersect, std::tan(theta / Real(4))));
-      } else {
-        addOrReplaceIfSamePos(result, PlineVertex<Real>(intersect, u1.bulge()));
-      }
+      trimAtIntersect(intersect);
     } else if (t > Real(1) && !trueArcIntersect) {
-      connectUsingArc();
+      if (mode == JoinMode::Round)
+        connectUsingArc();
+      else
+        trimAtIntersect(intersect);
     } else if (s1.collapsedArc) {
       // collapsed arc connecting to arc, connect using arc
-      connectUsingArc();
+      if (mode == JoinMode::Round)
+        connectUsingArc();
+      else
+        trimAtIntersect(intersect);
     } else {
       // connect using line
       addOrReplaceIfSamePos(result, PlineVertex<Real>(v2.pos(), Real(0)));
@@ -226,7 +242,7 @@ void lineToArcJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> 
 
 template <typename Real>
 void arcToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> const &s2,
-                   bool connectionArcsAreCCW, Polyline<Real> &result) {
+                   bool connectionArcsAreCCW, JoinMode mode, Polyline<Real> &result) {
 
   const auto &v1 = s1.v1;
   const auto &v2 = s1.v2;
@@ -250,7 +266,7 @@ void arcToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> 
     const bool trueSegIntersect = !falseIntersect(t);
     const bool trueArcIntersect =
         pointWithinArcSweepAngle(arc.center, v1.pos(), v2.pos(), v1.bulge(), intersect);
-    if (trueSegIntersect && trueArcIntersect) {
+    if ((trueSegIntersect && trueArcIntersect) || mode == JoinMode::Miter) {
       PlineVertex<Real> &prevVertex = result.lastVertex();
 
       if (!prevVertex.bulgeIsZero() && !fuzzyEqual(prevVertex.pos(), v2.pos())) {
@@ -297,7 +313,7 @@ void arcToLineJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> 
 
 template <typename Real>
 void arcToArcJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> const &s2,
-                  bool connectionArcsAreCCW, Polyline<Real> &result) {
+                  bool connectionArcsAreCCW, JoinMode mode, Polyline<Real> &result) {
 
   const auto &v1 = s1.v1;
   const auto &v2 = s1.v2;
@@ -323,7 +339,7 @@ void arcToArcJoin(PlineOffsetSegment<Real> const &s1, PlineOffsetSegment<Real> c
     const bool trueArcIntersect2 =
         pointWithinArcSweepAngle(arc2.center, u1.pos(), u2.pos(), u1.bulge(), intersect);
 
-    if (trueArcIntersect1 && trueArcIntersect2) {
+    if ((trueArcIntersect1 && trueArcIntersect2) || (mode == Miter)) {
       PlineVertex<Real> &prevVertex = result.lastVertex();
       if (!prevVertex.bulgeIsZero() && !fuzzyEqual(prevVertex.pos(), v2.pos())) {
         // modify previous bulge and trim at intersect
@@ -480,7 +496,7 @@ bool pointValidForOffset(Polyline<Real> const &pline, Real offset,
 
 /// Creates the raw offset polyline.
 template <typename Real>
-Polyline<Real> createRawOffsetPline(Polyline<Real> const &pline, Real offset) {
+Polyline<Real> createRawOffsetPline(Polyline<Real> const &pline, Real offset, JoinMode mode) {
 
   Polyline<Real> result;
   if (pline.size() < 2) {
@@ -503,19 +519,19 @@ Polyline<Real> createRawOffsetPline(Polyline<Real> const &pline, Real offset) {
 
   const bool connectionArcsAreCCW = offset < Real(0);
 
-  auto joinResultVisitor = [connectionArcsAreCCW](PlineOffsetSegment<Real> const &s1,
-                                                  PlineOffsetSegment<Real> const &s2,
-                                                  Polyline<Real> &result) {
+  auto joinResultVisitor = [connectionArcsAreCCW, mode](PlineOffsetSegment<Real> const &s1,
+                                                        PlineOffsetSegment<Real> const &s2,
+                                                        Polyline<Real> &result) {
     const bool s1IsLine = s1.v1.bulgeIsZero();
     const bool s2IsLine = s2.v1.bulgeIsZero();
     if (s1IsLine && s2IsLine) {
-      internal::lineToLineJoin(s1, s2, connectionArcsAreCCW, result);
+      internal::lineToLineJoin(s1, s2, connectionArcsAreCCW, mode, result);
     } else if (s1IsLine) {
-      internal::lineToArcJoin(s1, s2, connectionArcsAreCCW, result);
+      internal::lineToArcJoin(s1, s2, connectionArcsAreCCW, mode, result);
     } else if (s2IsLine) {
-      internal::arcToLineJoin(s1, s2, connectionArcsAreCCW, result);
+      internal::arcToLineJoin(s1, s2, connectionArcsAreCCW, mode, result);
     } else {
-      internal::arcToArcJoin(s1, s2, connectionArcsAreCCW, result);
+      internal::arcToArcJoin(s1, s2, connectionArcsAreCCW, mode, result);
     }
   };
 
@@ -1255,19 +1271,19 @@ stitchOffsetSlicesTogether(std::vector<OpenPolylineSlice<Real>> const &slices, b
 /// Creates the paralell offset polylines to the polyline given.
 template <typename Real>
 std::vector<Polyline<Real>> parallelOffset(Polyline<Real> const &pline, Real offset,
-                                           bool hasSelfIntersects = false) {
+                                           JoinMode mode = Round, bool hasSelfIntersects = false) {
   using namespace internal;
   if (pline.size() < 2) {
     return std::vector<Polyline<Real>>();
   }
-  auto rawOffset = createRawOffsetPline(pline, offset);
+  auto rawOffset = createRawOffsetPline(pline, offset, mode);
   if (pline.isClosed() && !hasSelfIntersects) {
     auto slices = slicesFromRawOffset(pline, rawOffset, offset);
     return stitchOffsetSlicesTogether(slices, pline.isClosed(), rawOffset.size() - 1);
   }
 
   // not closed polyline or has self intersects, must apply dual clipping
-  auto dualRawOffset = createRawOffsetPline(pline, -offset);
+  auto dualRawOffset = createRawOffsetPline(pline, -offset, mode);
   auto slices = dualSliceAtIntersectsForOffset(pline, rawOffset, dualRawOffset, offset);
   return stitchOffsetSlicesTogether(slices, pline.isClosed(), rawOffset.size() - 1);
 }

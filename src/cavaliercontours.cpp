@@ -185,7 +185,8 @@ void cavc_parallel_offset(cavc_pline const *pline, cavc_real delta, cavc_pline_l
   CAVC_ASSERT(output, "null output not allowed");
   CAVC_BEGIN_TRY_CATCH
   bool mayHaveSelfIntersects = (option_flags & 0x1) != 0;
-  auto results = cavc::parallelOffset(pline->data, delta, mayHaveSelfIntersects);
+  cavc::JoinMode mode = (option_flags & 0x2) != 0 ? cavc::JoinMode::Round : cavc::JoinMode::Miter;
+  auto results = cavc::parallelOffset(pline->data, delta, mode, mayHaveSelfIntersects);
   *output = new cavc_pline_list();
   move_to_list(std::move(results), *output);
   CAVC_END_TRY_CATCH
